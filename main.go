@@ -601,6 +601,46 @@ func (a *Application) createHomepage() {
 			case 'p', 'P':
 				a.playPreviousSong()
 				return nil
+			case '+', '=': // 增加音量
+				if a.mpvInstance != nil && a.mpvInstance.Mpv != nil {
+					go func() {
+						// 获取当前音量
+						currentVol, err := a.mpvInstance.GetProperty("volume", mpv.FORMAT_DOUBLE)
+						if err == nil {
+							newVol := currentVol.(float64) + 5.0 // 增加5%
+							if newVol > 100 {
+								newVol = 100
+							}
+							a.mpvInstance.SetProperty("volume", mpv.FORMAT_DOUBLE, newVol)
+						}
+					}()
+				}
+				return nil
+			case '-', '_': // 减少音量
+				if a.mpvInstance != nil && a.mpvInstance.Mpv != nil {
+					go func() {
+						// 获取当前音量
+						currentVol, err := a.mpvInstance.GetProperty("volume", mpv.FORMAT_DOUBLE)
+						if err == nil {
+							newVol := currentVol.(float64) - 5.0 // 减少5%
+							if newVol < 0 {
+								newVol = 0
+							}
+							a.mpvInstance.SetProperty("volume", mpv.FORMAT_DOUBLE, newVol)
+						}
+					}()
+				}
+				return nil
+			case 'm', 'M': // 静音切换
+				if a.mpvInstance != nil && a.mpvInstance.Mpv != nil {
+					go func() {
+						currentMute, err := a.mpvInstance.GetProperty("mute", mpv.FORMAT_FLAG)
+						if err == nil {
+							a.mpvInstance.SetProperty("mute", mpv.FORMAT_FLAG, !currentMute.(bool))
+						}
+					}()
+				}
+				return nil
 			}
 		}
 

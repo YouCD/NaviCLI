@@ -3,4 +3,4 @@ run:
 	go run main.go
 
 build:
-	go build -o navicli .
+	CGO_ENABLED=1 go build -o navicli .
