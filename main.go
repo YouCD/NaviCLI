@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -298,10 +299,21 @@ func (a *Application) updateProgressBar() {
 
 			if !isCurrentlyPlaying {
 				if currentSongPtr != nil {
+					// 获取音量信息用于暂停状态显示
+					volumeDisplay := "100%"
+					if a.mpvInstance.Mpv != nil {
+						if vol, err := a.mpvInstance.GetProperty("volume", mpv.FORMAT_DOUBLE); err == nil {
+							volumeDisplay = fmt.Sprintf("%.0f%%", vol.(float64))
+						}
+						if mute, err := a.mpvInstance.GetProperty("mute", mpv.FORMAT_FLAG); err == nil && mute.(bool) {
+							volumeDisplay = "MUTE"
+						}
+					}
+
 					a.application.QueueUpdateDraw(func() {
 						if a.progressBar != nil && a.statusBar != nil {
-							pausedDisplay := `
-[darkgray]00:00:00 [darkgray][v-] [darkgray]100% [darkgray][v+] [darkgray][random]`
+							pausedDisplay := fmt.Sprintf(`
+[darkgray]00:00:00 [darkgray][v-] [darkgray]%s [darkgray][v+] [darkgray][random]`, volumeDisplay)
 							a.progressBar.SetText(pausedDisplay)
 
 							progressBar := "[darkgray]▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░ 0%"
@@ -343,6 +355,8 @@ func (a *Application) updateProgressBar() {
 
 				done := make(chan struct{})
 				var currentPos, totalDuration float64
+				var volume float64 = 100
+				var isMuted = false
 				var hasError bool
 
 				go func() {
@@ -363,6 +377,15 @@ func (a *Application) updateProgressBar() {
 						hasError = true
 						return
 					}
+
+					// 获取音量和静音状态
+					if vol, err := a.mpvInstance.GetProperty("volume", mpv.FORMAT_DOUBLE); err == nil {
+						volume = vol.(float64)
+					}
+					if mute, err := a.mpvInstance.GetProperty("mute", mpv.FORMAT_FLAG); err == nil {
+						isMuted = mute.(bool)
+					}
+
 					currentPos = pos.(float64)
 					totalDuration = duration.(float64)
 				}()
@@ -403,9 +426,15 @@ func (a *Application) updateProgressBar() {
 				}
 				progressBar += fmt.Sprintf("[white] %.1f%%", progress*100)
 
+				// 格式化音量显示
+				volumeDisplay := fmt.Sprintf("%.0f%%", volume)
+				if isMuted {
+					volumeDisplay = "MUTE"
+				}
+
 				progressText := fmt.Sprintf(`
-[darkgray]%s/%s [darkgray][random]`,
-					currentTime, totalTime)
+[darkgray]%s/%s [darkgray][v-] [white]%s[darkgray] [v+] [random]`,
+					currentTime, totalTime, volumeDisplay)
 
 				select {
 				case <-time.After(10 * time.Millisecond):
@@ -602,45 +631,25 @@ func (a *Application) createHomepage() {
 				a.playPreviousSong()
 				return nil
 			case '+', '=': // 增加音量
-				if a.mpvInstance != nil && a.mpvInstance.Mpv != nil {
-					go func() {
-						// 获取当前音量
-						currentVol, err := a.mpvInstance.GetProperty("volume", mpv.FORMAT_DOUBLE)
-						if err == nil {
-							newVol := currentVol.(float64) + 5.0 // 增加5%
-							if newVol > 100 {
-								newVol = 100
-							}
-							a.mpvInstance.SetProperty("volume", mpv.FORMAT_DOUBLE, newVol)
-						}
-					}()
-				}
+				a.SetVolume(true)
 				return nil
 			case '-', '_': // 减少音量
-				if a.mpvInstance != nil && a.mpvInstance.Mpv != nil {
-					go func() {
-						// 获取当前音量
-						currentVol, err := a.mpvInstance.GetProperty("volume", mpv.FORMAT_DOUBLE)
-						if err == nil {
-							newVol := currentVol.(float64) - 5.0 // 减少5%
-							if newVol < 0 {
-								newVol = 0
-							}
-							a.mpvInstance.SetProperty("volume", mpv.FORMAT_DOUBLE, newVol)
-						}
-					}()
-				}
+				a.SetVolume(false)
 				return nil
 			case 'm', 'M': // 静音切换
-				if a.mpvInstance != nil && a.mpvInstance.Mpv != nil {
-					go func() {
-						currentMute, err := a.mpvInstance.GetProperty("mute", mpv.FORMAT_FLAG)
-						if err == nil {
-							a.mpvInstance.SetProperty("mute", mpv.FORMAT_FLAG, !currentMute.(bool))
-						}
-					}()
-				}
+				a.muteButton()
 				return nil
+			case '/': // 添加搜索功能
+				a.search()
+				return nil
+			case 'q': // 添加搜索功能
+				go func() {
+					if err := a.loadMusic(); err != nil {
+						a.application.QueueUpdateDraw(func() {
+							a.statusBar.SetText("[red]load music failed: " + err.Error())
+						})
+					}
+				}()
 			}
 		}
 
@@ -697,11 +706,93 @@ func (a *Application) createHomepage() {
 	a.statusBar.SetText(welcomeMsg)
 }
 
+func (a *Application) search() {
+	// 创建搜索输入框
+	searchInput := tview.NewInputField().
+		SetLabel("Search: ").
+		SetFieldWidth(30)
+
+	// 创建一个自定义的模态框来容纳搜索输入框
+	modalFlex := tview.NewFlex().
+		SetDirection(tview.FlexRow).
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().
+			SetDirection(tview.FlexColumn).
+			AddItem(nil, 0, 1, false).
+			AddItem(searchInput, 40, 0, true).
+			AddItem(nil, 0, 1, false), 3, 0, true).
+		AddItem(nil, 0, 1, false)
+
+	// 设置背景色实现半透明效果
+	modalFlex.SetBackgroundColor(tcell.ColorBlack)
+	modalFlex.SetBackgroundColor(tcell.GetColor("rgba(0,0,0,0.5)"))
+
+	// 设置搜索输入框的完成函数
+	searchInput.SetDoneFunc(func(key tcell.Key) {
+		if key == tcell.KeyEnter {
+			searchText := searchInput.GetText()
+			if searchText != "" {
+				go func() {
+					if err := a.searchMusic(searchText); err != nil {
+						a.application.QueueUpdateDraw(func() {
+							a.statusBar.SetText("[red]Search failed: " + err.Error())
+						})
+					}
+				}()
+			}
+			// 移除悬浮框，恢复主界面
+			a.application.SetRoot(a.rootFlex, true)
+		} else if key == tcell.KeyEsc {
+			// 取消搜索，移除悬浮框
+			a.application.SetRoot(a.rootFlex, true)
+		}
+	})
+
+	// 使用 Pages 来实现悬浮效果
+	pages := tview.NewPages().
+		AddPage("main", a.rootFlex, true, true).
+		AddPage("search", modalFlex, true, false)
+
+	// 显示搜索页面
+	pages.ShowPage("search")
+	a.application.SetRoot(pages, true)
+	a.application.SetFocus(searchInput)
+}
+func (a *Application) SetVolume(addFlag bool) {
+	if a.mpvInstance != nil && a.mpvInstance.Mpv != nil {
+		go func() {
+			// 获取当前音量
+			currentVol, err := a.mpvInstance.GetProperty("volume", mpv.FORMAT_DOUBLE)
+			if err == nil {
+				newVol := currentVol.(float64)
+				if addFlag {
+					newVol += 5.0 // 增加5%
+					if newVol > 100 {
+						newVol = 100
+					}
+				} else {
+					newVol -= 5.0
+					if newVol < 0 {
+						newVol = 0
+					}
+				}
+
+				a.mpvInstance.SetProperty("volume", mpv.FORMAT_DOUBLE, newVol)
+			}
+		}()
+	}
+}
+
 func (a *Application) renderSongTable() {
+	// 清除现有行，但保留表头
 	for i := a.songTable.GetRowCount() - 1; i > 0; i-- {
 		a.songTable.RemoveRow(i)
 	}
+
 	pageData := a.getCurrentPageData()
+
+	// 保存匹配的行索引
+	matchingRows := make([]int, 0)
 
 	for i, song := range pageData {
 		row := i + 1
@@ -733,6 +824,10 @@ func (a *Application) renderSongTable() {
 		a.songTable.SetCell(row, 2, artistCell)
 		a.songTable.SetCell(row, 3, albumCell)
 		a.songTable.SetCell(row, 4, durationCell)
+		// 如果是搜索结果，记录匹配的行
+		if len(a.totalSongs) == 1 && reflect.DeepEqual(&a.totalSongs[0], &song) {
+			matchingRows = append(matchingRows, row)
+		}
 	}
 
 	a.songTable.SetSelectedStyle(tcell.StyleDefault.
@@ -740,6 +835,11 @@ func (a *Application) renderSongTable() {
 		Foreground(tcell.ColorWhite))
 
 	a.songTable.ScrollToBeginning()
+
+	// 如果有匹配的行，则定位到第一行匹配的行
+	if len(matchingRows) > 0 {
+		a.songTable.Select(matchingRows[0], 0)
+	}
 }
 
 func (a *Application) loadMusic() error {
@@ -756,6 +856,44 @@ func (a *Application) loadMusic() error {
 		})
 	}
 	return nil
+}
+func (a *Application) searchMusic(name string) error {
+	matchingSongs := make([]subsonic.Song, 0)
+
+	for _, song := range a.totalSongs {
+		if strings.Contains(strings.ToLower(song.Title), strings.ToLower(name)) ||
+			strings.Contains(strings.ToLower(song.Artist), strings.ToLower(name)) ||
+			strings.Contains(strings.ToLower(song.Album), strings.ToLower(name)) {
+			matchingSongs = append(matchingSongs, song)
+		}
+	}
+
+	if len(matchingSongs) > 0 {
+		a.totalSongs = matchingSongs
+		a.totalPages = (len(a.totalSongs) + a.pageSize - 1) / a.pageSize
+		a.application.QueueUpdateDraw(func() {
+			a.renderSongTable()
+		})
+		return nil
+	}
+
+	// 如果没有找到匹配项，显示提示信息
+	a.application.QueueUpdateDraw(func() {
+		a.statusBar.SetText(fmt.Sprintf("[yellow]No results found for: %s", name))
+	})
+
+	return nil
+}
+
+func (a *Application) muteButton() {
+	if a.mpvInstance != nil && a.mpvInstance.Mpv != nil {
+		go func() {
+			currentMute, err := a.mpvInstance.GetProperty("mute", mpv.FORMAT_FLAG)
+			if err == nil {
+				a.mpvInstance.SetProperty("mute", mpv.FORMAT_FLAG, !currentMute.(bool))
+			}
+		}()
+	}
 }
 
 func eventListener(ctx context.Context, m *mpv.Mpv) chan *mpv.Event {
@@ -803,7 +941,6 @@ func ViperInit() {
 
 	for _, key := range required {
 		if !viper.IsSet(key) {
-
 			os.Exit(1)
 		}
 	}
@@ -827,7 +964,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
+	mpvInstance.SetProperty("volume", mpv.FORMAT_DOUBLE, 50.0)
 	app := &Application{
 		application:    tview.NewApplication(),
 		subsonicClient: subsonicClient,
@@ -860,7 +997,7 @@ func main() {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-
+				log.Println(r)
 			}
 		}()
 
