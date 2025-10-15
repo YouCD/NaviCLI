@@ -46,6 +46,8 @@ type Application struct {
 	loadingMux  sync.Mutex
 
 	currentSongIndex int
+	isSearching      bool
+	searchMux        sync.Mutex
 }
 
 func (a *Application) setupPagination() {
@@ -655,6 +657,19 @@ func (a *Application) createHomepage() {
 
 		switch event.Key() {
 		case tcell.KeyEsc, tcell.KeyCtrlC:
+			// 检查是否处于搜索模式
+			a.searchMux.Lock()
+			isSearching := a.isSearching
+			a.searchMux.Unlock()
+
+			if isSearching {
+				// 如果在搜索模式下，取消搜索而不是退出程序
+				a.application.SetRoot(a.rootFlex, true)
+				a.searchMux.Lock()
+				a.isSearching = false
+				a.searchMux.Unlock()
+				return nil
+			}
 			log.Println("user request exit program")
 
 			if a.mpvInstance != nil && a.mpvInstance.Mpv != nil {
@@ -707,6 +722,12 @@ func (a *Application) createHomepage() {
 }
 
 func (a *Application) search() {
+	searchInput, pages := a.searchUI()
+	a.application.SetRoot(pages, true)
+	a.application.SetFocus(searchInput)
+}
+
+func (a *Application) searchUI() (*tview.InputField, *tview.Pages) {
 	// 创建搜索输入框
 	searchInput := tview.NewInputField().
 		SetLabel("Search: ").
@@ -729,6 +750,10 @@ func (a *Application) search() {
 
 	// 设置搜索输入框的完成函数
 	searchInput.SetDoneFunc(func(key tcell.Key) {
+		a.searchMux.Lock()
+		a.isSearching = false
+		a.searchMux.Unlock()
+
 		if key == tcell.KeyEnter {
 			searchText := searchInput.GetText()
 			if searchText != "" {
@@ -754,9 +779,13 @@ func (a *Application) search() {
 		AddPage("search", modalFlex, true, false)
 
 	// 显示搜索页面
+	// 显示搜索页面前设置搜索标志
+	a.searchMux.Lock()
+	a.isSearching = true
+	a.searchMux.Unlock()
+
 	pages.ShowPage("search")
-	a.application.SetRoot(pages, true)
-	a.application.SetFocus(searchInput)
+	return searchInput, pages
 }
 func (a *Application) SetVolume(addFlag bool) {
 	if a.mpvInstance != nil && a.mpvInstance.Mpv != nil {
