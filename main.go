@@ -74,6 +74,13 @@ func (a *Application) playSongAtIndex(index int) {
 	a.isPlaying = false
 	a.loadingMux.Unlock()
 
+	// 更新表格选中行
+	a.application.QueueUpdateDraw(func() {
+		a.songTable.Select(index+1, 0)
+		// 确保选中的行在可视区域内
+		a.songTable.ScrollToBeginning()
+	})
+
 	loadingBar := "[yellow]▓▓▓[darkgray]░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ Loading..."
 	info := fmt.Sprintf(`
 [white]Current %d:
